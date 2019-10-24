@@ -28,6 +28,8 @@ import base64
 import urllib2
 import hexdump
 from capstone import *
+from unicorn import *
+from unicorn.x86_const import *
 ```
 
 First, decode the base64 string:
@@ -173,7 +175,7 @@ hexdump.hexdump(buf)
     00000730: A9 83 E2 A9 A7 E2 A8 BD  E2 A8 BD E2 A8 8A 0A     ...............
 
 
-The content of the file shows what seems to be an encryption function `E()`. It takes each byte value from an unknown  buffer and prepends the value `0x2a` to it, and finally converts it to a character.
+The content of the file shows what seems to be an encryption function `E()` followed by a byte buffer. The `E()` function takes each byte value from an unknown buffer and prepends the value `0x2a` to it, and finally converts it to a character. The appended buffer seems to be the output of this function.
 
 Before the character conversion, the 16bit values can be seen as [Unicode Codepoints](https://en.wikipedia.org/wiki/Unicode#Code_point_planes_and_blocks) in the range [U+2A00 to U+2AFF (Supplemental Mathematical Operators](https://www.utf8-chartable.de/unicode-utf8-table.pl?start=10752&view=3)
 
@@ -255,28 +257,79 @@ The result is [x86-64](https://en.wikipedia.org/wiki/X86-64) machine code, which
 ```python
 CODE = decoded[0x52:]
 md = Cs(CS_ARCH_X86, CS_MODE_64)
-for i in md.disasm(CODE, 0x1000):
-    print("0x%x: %s %s\t%s" %(i.address, hexdump.dump(i.bytes).ljust(32), i.mnemonic, i.op_str))
+for i in md.disasm(CODE, 0x0000):
+    print("0x%04x: %s %s\t%s" %(i.address, hexdump.dump(i.bytes).ljust(32), i.mnemonic, i.op_str))
 
 ```
 
-    0x1000: 48 31 C9                         xor	rcx, rcx
-    0x1003: 48 81 E9 D8 FF FF FF             sub	rcx, -0x28
-    0x100a: 48 8D 05 EF FF FF FF             lea	rax, [rip - 0x11]
-    0x1011: 48 BB 20 80 67 23 23 E1 30 08    movabs	rbx, 0x830e12323678020
-    0x101b: 48 31 58 27                      xor	qword ptr [rax + 0x27], rbx
-    0x101f: 48 2D F8 FF FF FF                sub	rax, -8
-    0x1025: E2 F4                            loop	0x101b
-    0x1027: DC C8                            fmul	st(0), st(0)
-    0x1029: E6 C7                            out	0xc7, al
-    0x102b: D3 1E                            rcr	dword ptr [rsi], cl
-    0x102d: CF                               iretd	
-    0x102e: F7 C8 50 67 23 23                test	eax, 0x23236750
-    0x1034: A0 61 49 70 D2 36 75 6B D0       movabs	al, byte ptr [0xd06b7536d2704961]
-    0x103d: E2 6D                            loop	0x10ac
-    0x103f: 68 0B 35 43 1D                   push	0x1d43350b
-    0x1044: A9 BB 5A 38 BE                   test	eax, 0xbe385abb
+    0x0000: 48 31 C9                         xor	rcx, rcx
+    0x0003: 48 81 E9 D8 FF FF FF             sub	rcx, -0x28
+    0x000a: 48 8D 05 EF FF FF FF             lea	rax, [rip - 0x11]
+    0x0011: 48 BB 20 80 67 23 23 E1 30 08    movabs	rbx, 0x830e12323678020
+    0x001b: 48 31 58 27                      xor	qword ptr [rax + 0x27], rbx
+    0x001f: 48 2D F8 FF FF FF                sub	rax, -8
+    0x0025: E2 F4                            loop	0x1b
+    0x0027: DC C8                            fmul	st(0), st(0)
+    0x0029: E6 C7                            out	0xc7, al
+    0x002b: D3 1E                            rcr	dword ptr [rsi], cl
+    0x002d: CF                               iretd	
+    0x002e: F7 C8 50 67 23 23                test	eax, 0x23236750
+    0x0034: A0 61 49 70 D2 36 75 6B D0       movabs	al, byte ptr [0xd06b7536d2704961]
+    0x003d: E2 6D                            loop	0xac
+    0x003f: 68 0B 35 43 1D                   push	0x1d43350b
+    0x0044: A9 BB 5A 38 BE                   test	eax, 0xbe385abb
 
+
+Now let's do a symbolic execution of the code using the [Unicorn Engine](https://www.unicorn-engine.org/docs/tutorial.html):
+
+
+```python
+mu = Uc(UC_ARCH_X86, UC_MODE_64)
+mu.mem_map(0, 2*1024*1024)
+mu.mem_write(0, CODE)
+try:
+    mu.emu_start(0, 512)
+except UcError as e:
+    pass
+mem = mu.mem_read(0, 512)
+hexdump.hexdump(str(mem))
+```
+
+    00000000: 48 31 C9 48 81 E9 D8 FF  FF FF 48 8D 05 EF FF FF  H1.H......H.....
+    00000010: FF 48 BB 20 80 67 23 23  E1 30 08 48 31 58 27 48  .H. .g##.0.H1X'H
+    00000020: 2D F8 FF FF FF E2 F4 FC  48 81 E4 F0 FF FF FF E8  -.......H.......
+    00000030: D0 00 00 00 41 51 41 50  52 51 56 48 31 D2 65 48  ....AQAPRQVH1.eH
+    00000040: 8B 52 60 3E 48 8B 52 18  3E 48 8B 52 20 3E 48 8B  .R`>H.R.>H.R >H.
+    00000050: 72 50 3E 48 0F B7 4A 4A  4D 31 C9 48 31 C0 AC 3C  rP>H..JJM1.H1..<
+    00000060: 61 7C 02 2C 20 41 C1 C9  0D 41 01 C1 E2 ED 52 41  a|., A...A....RA
+    00000070: 51 3E 48 8B 52 20 3E 8B  42 3C 48 01 D0 3E 8B 80  Q>H.R >.B<H..>..
+    00000080: 88 00 00 00 48 85 C0 74  6F 48 01 D0 50 3E 8B 48  ....H..toH..P>.H
+    00000090: 18 3E 44 8B 40 20 49 01  D0 E3 5C 48 FF C9 3E 41  .>D.@ I...\H..>A
+    000000A0: 8B 34 88 48 01 D6 4D 31  C9 48 31 C0 AC 41 C1 C9  .4.H..M1.H1..A..
+    000000B0: 0D 41 01 C1 38 E0 75 F1  3E 4C 03 4C 24 08 45 39  .A..8.u.>L.L$.E9
+    000000C0: D1 75 D6 58 3E 44 8B 40  24 49 01 D0 66 3E 41 8B  .u.X>D.@$I..f>A.
+    000000D0: 0C 48 3E 44 8B 40 1C 49  01 D0 3E 41 8B 04 88 48  .H>D.@.I..>A...H
+    000000E0: 01 D0 41 58 41 58 5E 59  5A 41 58 41 59 41 5A 48  ..AXAX^YZAXAYAZH
+    000000F0: 83 EC 20 41 52 FF E0 58  41 59 5A 3E 48 8B 12 E9  .. AR..XAYZ>H...
+    00000100: 49 FF FF FF 5D 49 C7 C1  00 00 00 00 3E 48 8D 95  I...]I......>H..
+    00000110: FE 00 00 00 3E 4C 8D 85  24 01 00 00 48 31 C9 41  ....>L..$...H1.A
+    00000120: BA 45 83 56 07 FF D5 48  31 C9 41 BA F0 B5 A2 56  .E.V...H1.A....V
+    00000130: FF D5 77 65 6C 6C 20 64  6F 6E 65 21 20 79 6F 75  ..well done! you
+    00000140: 72 20 66 6C 61 67 20 69  73 3A 20 7B 6D 73 6F 63  r flag is: {msoc
+    00000150: 5F 72 75 6C 65 7A 7D 00  4D 65 73 73 61 67 65 42  _rulez}.MessageB
+    00000160: 6F 78 00 00 00 00 00 0A  00 00 00 00 00 00 00 00  ox..............
+    00000170: 00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  ................
+    00000180: 00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  ................
+    00000190: 00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  ................
+    000001A0: 00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  ................
+    000001B0: 00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  ................
+    000001C0: 00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  ................
+    000001D0: 00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  ................
+    000001E0: 00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  ................
+    000001F0: 00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  ................
+
+
+The code writes the flag to memory near offset 0x00000140. It says: `{msoc_rulez}`. What I can say is: this challenge rules ! :-)
 
 
 ```python
